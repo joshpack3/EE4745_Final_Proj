@@ -17,7 +17,7 @@ __pycache__/
 htmlcov/
 
 # Editor/IDE Files
-.vscode/
+# .vscode/
 .idea/
 *.iml
 *.sublime-project
