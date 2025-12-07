@@ -1,2 +1,29 @@
 # Virtual environments
 .venv/
+venv/
+env/
+
+# Python build artifacts
+build/
+dist/
+*.pyc
+__pycache__/
+**/*.egg-info/
+
+# Testing and coverage
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+runs/
+
+# Editor/IDE Files
+.vscode/
+.idea/
+*.iml
+*.sublime-project
+*.sublime-workspace
+
+# Operating System Files
+.DS_Store
+Thumbs.db
