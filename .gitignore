@@ -15,7 +15,6 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
-runs/
 
 # Editor/IDE Files
 .vscode/
