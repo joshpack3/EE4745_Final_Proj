@@ -5,35 +5,16 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import matplotlib.pyplot as plt
 import scipy.ndimage
 from sklearn.metrics import classification_report
 
-# --- Imports from Your Project Utilities and Models ---
-# NOTE: These model classes must be available via your package structure.
-
-# --- Configuration Class ---
-
-class AttackConfig:
-    """Configuration class for Problem B parameters."""
-    data_root = "data/Sports"
-    image_size = 64
-    batch_size = 32
-    num_classes = 10
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Attack settings
-    eps = 8 / 255.0         # L-infinity constraint 
-    pgd_alpha = 2 / 255.0   # Step size 
-    pgd_steps = 20
-    
-    # Target (Problem B requirement)
-    target_class_name = "basketball"
-
+from .project_utils import count_parameters, evaluate_model
 
 # --- Model Loading (Specific to Problem B Checkpoints) ---
 
-def load_models_for_attack(cfg: AttackConfig, model_a_class, model_b_class, class_names, ckpt_dir, ckpt_a_name, ckpt_b_name):
+def load_models_for_attack(cfg, model_a_class, model_b_class, class_names, ckpt_dir, ckpt_a_name, ckpt_b_name):
     """Load trained model checkpoints from Part A."""
     device = cfg.device
 
@@ -322,3 +303,73 @@ def save_interpretability_maps(model, img_clean, img_adv, label_true, label_adv,
     # (show_and_save_overlay handles its own sub-directory creation if needed)
     show_and_save_overlay(img_clean, cam_clean, str(base / f"{prefix}_gradcam_clean_{label_true_name}.png"))
     show_and_save_overlay(img_adv, cam_adv, str(base / f"{prefix}_gradcam_adv_{label_adv_name}.png"))
+
+# Adversarial Training Function
+
+def train_robust_model(model, model_name, train_loader, val_loader, cfg):
+    """
+    Trains a model using Adversarial Training (PGD-AT).
+    PGD examples are generated online and fed to the optimizer.
+    """
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.CrossEntropyLoss()
+    
+    best_accuracy = 0.0
+    
+    start_time_total = time.time()
+    
+    print(f"\n--- Starting ADVERSARIAL TRAINING for {model_name} ---")
+    
+    for epoch in range(cfg.num_epochs):
+        model.train()
+        total_train, correct_train = 0, 0
+        
+        # Start Time
+        start_time_epoch = time.time()
+        
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(cfg.device), labels.to(cfg.device)
+            
+            # 1. GENERATE ADVERSARIAL EXAMPLES ONLINE (Untargeted PGD)
+            # pgd_attack must be available here
+            x_adv = pgd_attack(
+                model, inputs, labels, cfg.PGD_EPS, cfg.PGD_ALPHA, cfg.PGD_STEPS, 
+                targeted=False, target_labels=None
+            )
+            
+            # 2. Train on Adversarial Data
+            optimizer.zero_grad()
+            outputs = model(x_adv)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            
+            # 3. Track clean accuracy (using the adversarial outputs)
+            _, predicted = torch.max(outputs.data, 1)
+            total_train += labels.size(0)
+            correct_train += (predicted == labels).sum().item()
+
+        # End Time
+        epoch_time = time.time() - start_time_epoch
+        
+        # Evaluation (Using clean data for standard evaluation)
+        # evaluate_model must be available here
+        final_loss, val_accuracy, all_preds, all_labels = evaluate_model(model, val_loader, criterion, cfg.device)
+        train_accuracy = 100 * correct_train / total_train
+
+        print(f"Epoch {epoch+1}/{cfg.num_epochs} | Train Acc: {train_accuracy:.2f}% | Val Acc: {val_accuracy:.2f}% | Time: {epoch_time:.2f}s")
+        
+        # Save best model
+        if val_accuracy > best_accuracy:
+            best_accuracy = val_accuracy
+            checkpoint_path = os.path.join(cfg.out_dir, f"{model_name}-robust.pt")
+            torch.save(model.state_dict(), checkpoint_path)
+
+    # Final Time
+    total_training_time = time.time() - start_time_total
+    
+    return {
+        'model_name': model_name,
+        'total_training_time': total_training_time,
+        'final_val_accuracy': best_accuracy,
+    }
