@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.utils.prune as prune
 
-from .project_utils import evaluate_model
+from .basic_utils import evaluate_model
 
 def count_sparse_weights(model):
     """Counts the total number of weights and the number of zero (pruned) weights."""
@@ -27,16 +27,20 @@ def count_sparse_weights(model):
 
 def prune_and_evaluate(model_class, model_ckpt_path, sparsity_level, cfg, train_loader, val_loader, evaluate_model_func, finetune_epochs=5):
     """
-    Applies pruning, evaluates pre-finetune, performs fine-tuning, and evaluates post-finetune.
+    Applies pruning, evaluates pre-finetune, performs fine-tuning with epoch monitoring, 
+    and evaluates post-finetune.
     """
     # 1. Setup Model
     device = cfg.device
+    model_name = model_class.__name__
+    criterion = nn.CrossEntropyLoss()
+    
     model = model_class(num_classes=cfg.num_classes).to(device)
     model.load_state_dict(torch.load(model_ckpt_path, map_location=device))
     
     model_pruned = copy.deepcopy(model)
     
-    # 2. Apply Pruning
+    # 2. Apply Pruning (Global Unstructured L1)
     parameters_to_prune = []
     for name, module in model_pruned.named_modules():
         if isinstance(module, (nn.Conv2d, nn.Linear)):
@@ -48,35 +52,33 @@ def prune_and_evaluate(model_class, model_ckpt_path, sparsity_level, cfg, train_
         amount=sparsity_level,
     )
     
-    # Make pruning permanent (removes buffers, keeps the zeros)
+    # Make pruning permanent
     for module, name in parameters_to_prune:
         prune.remove(module, name)
 
     # 3. Pre-Finetune Evaluation
-    criterion = nn.CrossEntropyLoss()
     _, acc_pre, _, _ = evaluate_model_func(model_pruned, val_loader, criterion, device)
-    
     total_w, zero_w, sparsity = count_sparse_weights(model_pruned)
     
-    # --- Checkpoint Path Setup ---
-    # Use a generic name for the best checkpoint during fine-tuning
-    best_finetune_ckpt_path = os.path.join(cfg.out_dir, f"{model_class.__name__}-pruned-{int(sparsity_level*100)}%-best.pt")
+    # Checkpoint setup
+    best_finetune_ckpt_path = os.path.join(cfg.out_dir, f"{model_name}-pruned-{int(sparsity_level*100)}%-best.pt")
+
+    # Save the initial pruned state to ensure file existence and proper baseline
+    torch.save(model_pruned.state_dict(), best_finetune_ckpt_path)
     
     # 4. Fine-Tuning
-    optimizer = optim.Adam(model_pruned.parameters(), lr=0.0001) # Smaller LR for fine-tuning
-    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model_pruned.parameters(), lr=0.0001)
 
-    best_finetune_acc = acc_pre
-    # Path for the best-performing checkpoint
-    best_finetune_ckpt_path = os.path.join(cfg.out_dir, f"{model_class.__name__}-pruned-{int(sparsity_level*100)}%-best.pt")
-
-    # SAVE THE INITIAL PRUNED STATE TO ENSURE THE FILE EXISTS, 
-    # IN CASE FINE-TUNING DOESN'T IMPROVE ACCURACY
-    torch.save(model_pruned.state_dict(), best_finetune_ckpt_path)
+    best_finetune_acc = 0
+    
+    print(f"\n--- Fine-Tuning ({model_name} @ {sparsity*100:.0f}% Sparsity) ---")
+    print(f"Initial Acc: {acc_pre:.2f}%")
     
     for epoch in range(finetune_epochs):
         model_pruned.train()
-        # ... (training loop remains the same)
+        start_time_epoch = time.time()
+        
+        # Training Step
         for inputs, labels in train_loader:
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -85,25 +87,29 @@ def prune_and_evaluate(model_class, model_ckpt_path, sparsity_level, cfg, train_
             loss.backward()
             optimizer.step()
         
-        # Evaluate model utility on the validation set
+        # Evaluation Step (Validation)
+        epoch_time = time.time() - start_time_epoch
         _, current_acc, _, _ = evaluate_model_func(model_pruned, val_loader, criterion, device)
         
-        # Save the model state dict corresponding to the BEST accuracy achieved so far
+        # Checkpoint and Tracking
         if current_acc > best_finetune_acc:
             best_finetune_acc = current_acc
             torch.save(model_pruned.state_dict(), best_finetune_ckpt_path)
+            status = "(New Best)"
+        else:
+            status = ""
             
+        print(f"Epoch {epoch+1}/{finetune_epochs} | Val Acc: {current_acc:.2f}% | Time: {epoch_time:.2f}s {status}")
+
     # 5. Final Evaluation and Metric Collection
     
     # Load the best weights found (either the initial pruned state or the best fine-tuned state)
-    # This step is safe because we saved the model at the start of fine-tuning (or before).
     model_pruned.load_state_dict(torch.load(best_finetune_ckpt_path, map_location=device))
-    
-    # Use the best accuracy achieved as the final post-finetune score
     acc_post = best_finetune_acc 
     
-    # Calculate model size on disk (using the BEST checkpoint path, which now definitely exists)
+    # Calculate model size on disk
     model_size_mb = os.path.getsize(best_finetune_ckpt_path) / (1024 * 1024)
+    print(f"Final Best Acc (Post-Finetune): {acc_post:.2f}%")
 
     return {
         'sparsity_target': sparsity_level,

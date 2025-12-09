@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import scipy.ndimage
 from sklearn.metrics import classification_report
 
-from .project_utils import count_parameters, evaluate_model
+from .basic_utils import count_parameters, evaluate_model
 
 # --- Model Loading (Specific to Problem B Checkpoints) ---
 
